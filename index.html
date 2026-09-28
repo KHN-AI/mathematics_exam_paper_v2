@@ -30,27 +30,6 @@
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 10px; }
         .custom-scrollbar:hover::-webkit-scrollbar-thumb { background-color: #94a3b8; }
     </style>
-
-    <!-- Firebase Imports 雲端功能 -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        const defaultFirebaseConfig = { projectId: "mock-project" };
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : defaultFirebaseConfig;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exam-sys';
-
-        let app, auth, db;
-        try {
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
-            window.firebaseAPI = { auth, db, appId, signInAnonymously, signInWithCustomToken, collection, addDoc, getDocs, doc, deleteDoc };
-        } catch (e) {
-            console.error("Firebase init failed", e);
-        }
-    </script>
 </head>
 <body>
     <div id="root"></div>
@@ -103,16 +82,11 @@
             const [editingQuestionId, setEditingQuestionId] = useState(null);
             const [editFormData, setEditFormData] = useState({ qNum: '', type: '', high: '', score: '' });
 
-            // 系統提示與雲端儲存狀態
+            // 系統提示狀態
             const [toastMessage, setToastMessage] = useState(null);
             const [confirmDialog, setConfirmDialog] = useState(null);
-            const [cloudUser, setCloudUser] = useState(null);
-            const [savedBlueprints, setSavedBlueprints] = useState([]);
-            const [isCloudLoading, setIsCloudLoading] = useState(false);
-            const [showLoadModal, setShowLoadModal] = useState(false);
-            const [showSaveModal, setShowSaveModal] = useState(false);
-            const [saveName, setSaveName] = useState('');
             const [isSidebarOpen, setIsSidebarOpen] = useState(false); // 控制小螢幕時的右側統計面板
+            const jsonFileInputRef = useRef(null);
 
             // 顯示 Toast 訊息
             const showToast = (msg, isError = false) => {
@@ -120,121 +94,69 @@
                 setTimeout(() => setToastMessage(null), 3000);
             };
 
-            // 初始化 Firebase 驗證
-            useEffect(() => {
-                const initAuth = async () => {
-                    if (!window.firebaseAPI) return;
-                    const { auth, signInWithCustomToken, signInAnonymously } = window.firebaseAPI;
+            // 匯出 JSON 檔案
+            const exportJSON = () => {
+                try {
+                    const exportData = {
+                        version: "1.0",
+                        exportDate: new Date().toISOString(),
+                        basicInfo,
+                        examScopes,
+                        questions,
+                        curriculumDB
+                    };
+                    const jsonString = JSON.stringify(exportData, null, 2);
+                    const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    const fileName = `擬題進度_${basicInfo.year}_${basicInfo.targetGrade}_${basicInfo.examStage}.json`;
+                    link.href = url;
+                    link.download = fileName;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                    showToast("✅ 已成功匯出 JSON 檔案！");
+                } catch (e) {
+                    showToast("匯出 JSON 失敗，請重試", true);
+                }
+            };
+
+            // 載入 JSON 檔案
+            const handleJSONUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
                     try {
-                        if (typeof __initial_auth_token !== 'undefined') {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
+                        const parsed = JSON.parse(event.target.result);
+                        if (!parsed.basicInfo && !parsed.questions && !parsed.examScopes) {
+                            showToast("⚠️ 檔案格式不符合擬題系統規範", true);
+                            return;
                         }
-                        setCloudUser(auth.currentUser);
-                        fetchSavedBlueprints();
-                    } catch (e) {
-                        console.error("Auth Failed", e);
+
+                        setConfirmDialog({
+                            title: "確認載入 JSON 進度檔",
+                            message: `確定要載入檔案「${file.name}」？目前畫面上未匯出的進度將會被覆蓋！`,
+                            onConfirm: () => {
+                                if (parsed.basicInfo) setBasicInfo(parsed.basicInfo);
+                                if (parsed.examScopes) setExamScopes(parsed.examScopes);
+                                if (parsed.questions) setQuestions(parsed.questions);
+                                if (parsed.curriculumDB && Array.isArray(parsed.curriculumDB)) {
+                                    setCurriculumDB(parsed.curriculumDB);
+                                }
+                                setConfirmDialog(null);
+                                showToast("✅ 成功載入 JSON 擬題進度！");
+                            }
+                        });
+                    } catch (err) {
+                        showToast("JSON 檔案解析失敗，請確認檔案格式是否正確", true);
                     }
                 };
-                
-                const checkGlobal = setInterval(() => {
-                    if (window.firebaseAPI) {
-                        clearInterval(checkGlobal);
-                        initAuth();
-                    }
-                }, 100);
-                setTimeout(() => clearInterval(checkGlobal), 5000);
-            }, []);
-
-            const fetchSavedBlueprints = async () => {
-                if (!window.firebaseAPI || !window.firebaseAPI.auth.currentUser) return;
-                const { db, appId, collection, getDocs } = window.firebaseAPI;
-                try {
-                    const ref = collection(db, 'artifacts', appId, 'public', 'data', 'blueprints');
-                    const snap = await getDocs(ref);
-                    let docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    docs.sort((a, b) => b.timestamp - a.timestamp);
-                    setSavedBlueprints(docs);
-                } catch (e) {
-                    console.error("Fetch blueprints failed", e);
-                }
-            };
-
-            const triggerSave = () => {
-                if (!cloudUser) return showToast("雲端尚未連線，無法儲存", true);
-                setSaveName(`${basicInfo.targetGrade || '未定年級'} - ${basicInfo.examStage || '未定階段'} (${new Date().toLocaleDateString('zh-HK')})`);
-                setShowSaveModal(true);
-            };
-
-            const executeSave = async () => {
-                if (!saveName.trim()) return showToast("請輸入檔案名稱", true);
-                
-                const { db, appId, collection, addDoc } = window.firebaseAPI;
-                const payload = {
-                    name: saveName.trim(),
-                    timestamp: Date.now(),
-                    creatorId: cloudUser.uid,
-                    data: JSON.stringify({ basicInfo, examScopes, questions, curriculumDB })
-                };
-
-                try {
-                    setIsCloudLoading(true);
-                    const ref = collection(db, 'artifacts', appId, 'public', 'data', 'blueprints');
-                    await addDoc(ref, payload);
-                    showToast("✅ 成功儲存至雲端檔案櫃！");
-                    setShowSaveModal(false);
-                    fetchSavedBlueprints();
-                } catch (e) {
-                    showToast("儲存失敗", true);
-                } finally {
-                    setIsCloudLoading(false);
-                }
-            };
-
-            const confirmLoad = (blueprint) => {
-                setConfirmDialog({
-                    title: "確認載入檔案",
-                    message: `確定要載入「${blueprint.name}」？目前畫面上未儲存的進度將會被覆蓋！`,
-                    onConfirm: () => {
-                        try {
-                            const parsed = JSON.parse(blueprint.data);
-                            if (parsed.curriculumDB) setCurriculumDB(parsed.curriculumDB);
-                            if (parsed.basicInfo) setBasicInfo(parsed.basicInfo);
-                            if (parsed.examScopes) setExamScopes(parsed.examScopes);
-                            if (parsed.questions) setQuestions(parsed.questions);
-                            setShowLoadModal(false);
-                            setConfirmDialog(null);
-                            showToast("✅ 成功載入擬題表！");
-                        } catch (e) {
-                            showToast("載入失敗：檔案格式異常", true);
-                            setConfirmDialog(null);
-                        }
-                    }
-                });
-            };
-
-            const confirmDeleteBlueprint = (id, name) => {
-                setConfirmDialog({
-                    title: "確認刪除檔案",
-                    message: `確定要永久刪除「${name}」？此操作無法復原。`,
-                    isDanger: true,
-                    onConfirm: async () => {
-                        const { db, appId, doc, deleteDoc } = window.firebaseAPI;
-                        try {
-                            setIsCloudLoading(true);
-                            setConfirmDialog(null);
-                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'blueprints', id);
-                            await deleteDoc(docRef);
-                            showToast("🗑️ 已成功刪除檔案");
-                            fetchSavedBlueprints();
-                        } catch (e) {
-                            showToast("刪除失敗", true);
-                        } finally {
-                            setIsCloudLoading(false);
-                        }
-                    }
-                });
+                reader.readAsText(file);
+                // 重設 input 讓同一個檔案可以重複選取
+                e.target.value = '';
             };
 
             // 提取唯一選項的輔助函數
@@ -599,56 +521,14 @@
                         </div>
                     )}
 
-                    {/* 儲存與載入對話框維持原樣... */}
-                    {showSaveModal && (
-                        <div className="fixed inset-0 bg-black/50 z-[80] flex items-center justify-center p-4">
-                            <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full">
-                                <h3 className="text-xl font-bold mb-3 text-gray-800">💾 儲存至雲端</h3>
-                                <p className="text-gray-600 mb-4 text-sm">請為此擬題表輸入一個易於識別的名稱：</p>
-                                <input type="text" value={saveName} onChange={e => setSaveName(e.target.value)} className="w-full p-3 border rounded-xl mb-6 focus:ring-2 focus:ring-indigo-500" placeholder="例如：小五_考一_草稿" />
-                                <div className="flex justify-end gap-3">
-                                    <button onClick={() => setShowSaveModal(false)} className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200">取消</button>
-                                    <button onClick={executeSave} disabled={isCloudLoading} className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50">
-                                        {isCloudLoading ? '儲存中...' : '確認儲存'}
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {showLoadModal && (
-                        <div className="fixed inset-0 bg-black/50 z-[80] flex items-center justify-center p-4">
-                            <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col overflow-hidden">
-                                <div className="p-5 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-                                    <h3 className="text-xl font-bold text-gray-800">📂 雲端檔案櫃 (傳閱紀錄)</h3>
-                                    <button onClick={() => setShowLoadModal(false)} className="text-gray-400 hover:text-gray-700 text-3xl leading-none">&times;</button>
-                                </div>
-                                <div className="p-5 overflow-y-auto flex-1 bg-gray-50/50 custom-scrollbar">
-                                    {savedBlueprints.length === 0 ? (
-                                        <div className="text-center py-16">
-                                            <div className="text-6xl mb-4 opacity-30">🗂️</div>
-                                            <p className="text-gray-500 text-lg font-medium">檔案櫃空空如也</p>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-4">
-                                            {savedBlueprints.map(bp => (
-                                                <div key={bp.id} className="bg-white border border-gray-200 p-5 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 hover:border-indigo-400 hover:shadow-lg transition-all">
-                                                    <div>
-                                                        <h4 className="font-bold text-gray-800 text-lg">{bp.name}</h4>
-                                                        <p className="text-sm text-gray-500 mt-1">🕒 儲存時間：{new Date(bp.timestamp).toLocaleString('zh-HK')}</p>
-                                                    </div>
-                                                    <div className="flex gap-2 w-full md:w-auto">
-                                                        <button onClick={() => confirmLoad(bp)} className="flex-1 md:flex-none bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow hover:bg-emerald-600 transition-colors">📥 載入傳閱</button>
-                                                        <button onClick={() => confirmDeleteBlueprint(bp.id, bp.name)} className="flex-1 md:flex-none bg-red-50 text-red-600 px-5 py-2.5 rounded-xl text-sm font-bold border border-red-200 hover:bg-red-100 hover:border-red-300 transition-colors">刪除</button>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    )}
+                    {/* 隱藏的 JSON 檔案選取器 */}
+                    <input 
+                        type="file" 
+                        ref={jsonFileInputRef} 
+                        accept=".json" 
+                        onChange={handleJSONUpload} 
+                        className="hidden" 
+                    />
 
                     {/* 頂部固定導航列 (Title & Mobile Toggle) */}
                     <header className="shrink-0 bg-white border-b border-gray-200 px-4 sm:px-6 py-3 flex justify-between items-center z-20 shadow-sm">
@@ -672,7 +552,7 @@
                         {/* 左側：工作區 (獨立滾動) */}
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6 space-y-6 relative pb-20">
                             
-                            {/* 工具列：Excel 管理與雲端協作 (放在捲動區上方節省常駐空間) */}
+                            {/* 工具列：Excel 管理與 JSON 進度備份 */}
                             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                                 <div className="bg-blue-50/70 p-4 rounded-xl border border-blue-100 flex flex-col justify-center">
                                     <h3 className="text-sm font-bold text-blue-800 mb-2">📊 教學目標總表 Excel 檔案管理</h3>
@@ -687,13 +567,13 @@
                                     </div>
                                 </div>
                                 <div className="bg-indigo-50/70 p-4 rounded-xl border border-indigo-100 flex flex-col justify-center">
-                                    <h3 className="text-sm font-bold text-indigo-900 mb-2">☁️ 雲端協作與檔案傳閱</h3>
+                                    <h3 className="text-sm font-bold text-indigo-900 mb-2">💾 擬題進度備份與載入 (JSON 檔案)</h3>
                                     <div className="flex flex-wrap items-center gap-2">
-                                        <button onClick={triggerSave} className="flex-1 sm:flex-none bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-indigo-700 transition-all border border-transparent">
-                                            💾 儲存進度
+                                        <button onClick={exportJSON} className="flex-1 sm:flex-none bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-indigo-700 transition-all border border-transparent flex items-center justify-center gap-1.5">
+                                            💾 匯出 JSON 檔
                                         </button>
-                                        <button onClick={() => setShowLoadModal(true)} className="flex-1 sm:flex-none bg-white text-indigo-700 px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-indigo-50 transition-all border border-indigo-200">
-                                            📂 載入檔案櫃 ({savedBlueprints.length})
+                                        <button onClick={() => jsonFileInputRef.current && jsonFileInputRef.current.click()} className="flex-1 sm:flex-none bg-white text-indigo-700 px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm hover:bg-indigo-50 transition-all border border-indigo-200 flex items-center justify-center gap-1.5">
+                                            📂 載入 JSON 檔
                                         </button>
                                     </div>
                                 </div>
